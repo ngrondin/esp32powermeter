@@ -11,13 +11,20 @@
 #include "esp_sleep.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
+#include "rom/rtc.h"
+#include "rom/ets_sys.h"
 #include "soc/rtc.h"
+#include "soc/rtc_cntl_reg.h"
+#include "soc/rtc_io_reg.h"
+#include "soc/timer_group_reg.h"
 
 #define rtc_clock 150000ULL
 #define uS_TO_S_FACTOR 1000000ULL
 #define period_in_seconds 60
 
-#define WAKEPIN GPIO_NUM_25
+#define PULSE_CNT_GPIO_NUM 25
+#define PULSE_CNT_RTC_GPIO_NUM 6
+#define PULSE_CNT_IS_HIGH() ((REG_GET_FIELD(RTC_GPIO_IN_REG, RTC_GPIO_IN_NEXT) & BIT(PULSE_CNT_RTC_GPIO_NUM)) == 1)
 
 RTC_DATA_ATTR int flash_count = 0;
 RTC_DATA_ATTR uint32_t last_send = 0;
@@ -85,11 +92,6 @@ void send_data() {
     next_send = now + period_in_seconds;
 }
 
-void received_flash() {
-    flash_count++;
-    printf("Flash\n");
-}
-
 void timer_wakeup() {
     printf("Timer\n");
 }
@@ -99,10 +101,30 @@ void just_powered_on() {
     printf("Powered on\n");
 }
 
+void RTC_IRAM_ATTR esp_wake_deep_sleep(void)
+{
+    if(PULSE_CNT_IS_HIGH()) {
+        flash_count++;
+        do {
+            while (PULSE_CNT_IS_HIGH()) {
+                REG_WRITE(TIMG_WDTFEED_REG(0), 1); // feed the watchdog
+            }
+            ets_delay_us(10000); // debounce, 10ms
+        } while (PULSE_CNT_IS_HIGH());
+        //REG_WRITE(RTC_ENTRY_ADDR_REG, (uint32_t)&esp_wake_deep_sleep); // Set the pointer of the wake stub function.
+        CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_SLEEP_EN); // Go to sleep.
+        SET_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_SLEEP_EN);
+        while (true) {;} // A few CPU cycles may be necessary for the sleep to start...
+    } else {
+        esp_default_wake_deep_sleep();
+        return;
+    }
+}
+
 void app_main() {
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     switch(wakeup_reason) {
-        case ESP_SLEEP_WAKEUP_EXT0: received_flash(); break;
+        case ESP_SLEEP_WAKEUP_EXT0: ; break;
         case ESP_SLEEP_WAKEUP_TIMER: timer_wakeup(); break;
         default: just_powered_on(); break;
     }
@@ -112,11 +134,12 @@ void app_main() {
         send_data();
     }
 
-    while(wakeup_reason == ESP_SLEEP_WAKEUP_EXT0 && gpio_get_level(WAKEPIN) == 1) {
+    /*while(wakeup_reason == ESP_SLEEP_WAKEUP_EXT0 && gpio_get_level(WAKEPIN) == 1) {
         vTaskDelay(200 / portTICK_RATE_MS);
-    }
+    }*/
 
-    esp_sleep_enable_ext0_wakeup(WAKEPIN, 1);
+    //esp_set_deep_sleep_wake_stub(&esp_wake_deep_sleep);
+    esp_sleep_enable_ext0_wakeup(PULSE_CNT_GPIO_NUM, 1);
     esp_sleep_enable_timer_wakeup((next_send - now) * uS_TO_S_FACTOR);
     esp_deep_sleep_start();
 }
