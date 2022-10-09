@@ -16,6 +16,7 @@
 #include "soc/rtc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/rtc_io_reg.h"
+#include "soc/uart_reg.h"
 #include "soc/timer_group_reg.h"
 
 #define rtc_clock 150000ULL
@@ -26,9 +27,10 @@
 #define PULSE_CNT_RTC_GPIO_NUM 6
 #define PULSE_CNT_IS_HIGH() ((REG_GET_FIELD(RTC_GPIO_IN_REG, RTC_GPIO_IN_NEXT) & BIT(PULSE_CNT_RTC_GPIO_NUM)) == 1)
 
-RTC_DATA_ATTR int flash_count = 0;
-RTC_DATA_ATTR uint32_t last_send = 0;
-RTC_DATA_ATTR uint32_t next_send = 0;
+static RTC_DATA_ATTR int flash_count = 0;
+static RTC_DATA_ATTR uint32_t last_send = 0;
+static RTC_DATA_ATTR uint32_t next_send = 0;
+static const char RTC_RODATA_ATTR wake_fmt_str[] = "count=%d\n";
 
 static uint8_t broadcast_mac[ESP_NOW_ETH_ALEN] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -105,12 +107,16 @@ void RTC_IRAM_ATTR esp_wake_deep_sleep(void)
 {
     if(PULSE_CNT_IS_HIGH()) {
         flash_count++;
+        ets_printf(wake_fmt_str, flash_count);
         do {
             while (PULSE_CNT_IS_HIGH()) {
                 REG_WRITE(TIMG_WDTFEED_REG(0), 1); // feed the watchdog
             }
             ets_delay_us(10000); // debounce, 10ms
         } while (PULSE_CNT_IS_HIGH());
+        while (REG_GET_FIELD(UART_STATUS_REG(0), UART_ST_UTX_OUT)) {
+            ;
+        }
         //REG_WRITE(RTC_ENTRY_ADDR_REG, (uint32_t)&esp_wake_deep_sleep); // Set the pointer of the wake stub function.
         CLEAR_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_SLEEP_EN); // Go to sleep.
         SET_PERI_REG_MASK(RTC_CNTL_STATE0_REG, RTC_CNTL_SLEEP_EN);
